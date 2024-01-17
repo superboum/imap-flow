@@ -49,13 +49,13 @@ impl Default for ServerFlowOptions {
 
 #[derive(Debug)]
 pub struct ServerFlow {
-    stream: AnyStream,
-    options: ServerFlowOptions,
+    pub stream: AnyStream,
+    pub options: ServerFlowOptions,
 
-    handle_generator: HandleGenerator<ServerFlowResponseHandle>,
-    send_response_state: SendResponseState<ResponseCodec, Option<ServerFlowResponseHandle>>,
-    next_expected_message: NextExpectedMessage,
-    receive_command_state: ServerReceiveState,
+    pub handle_generator: HandleGenerator<ServerFlowResponseHandle>,
+    pub send_response_state: SendResponseState<ResponseCodec, Option<ServerFlowResponseHandle>>,
+    pub next_expected_message: NextExpectedMessage,
+    pub receive_command_state: ServerReceiveState,
 }
 
 impl ServerFlow {
@@ -165,7 +165,7 @@ impl ServerFlow {
         }
     }
 
-    async fn progress_send(&mut self) -> Result<Option<ServerFlowEvent>, ServerFlowError> {
+    pub async fn progress_send(&mut self) -> Result<Option<ServerFlowEvent>, ServerFlowError> {
         match self.send_response_state.progress(&mut self.stream).await? {
             Some((Some(handle), response)) => {
                 // A response was sucessfully sent, inform the caller
@@ -182,7 +182,7 @@ impl ServerFlow {
         }
     }
 
-    async fn progress_receive(&mut self) -> Result<Option<ServerFlowEvent>, ServerFlowError> {
+    pub async fn progress_receive(&mut self) -> Result<Option<ServerFlowEvent>, ServerFlowError> {
         match &mut self.receive_command_state {
             ServerReceiveState::Command(state) => {
                 match state.progress(&mut self.stream).await? {

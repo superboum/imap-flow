@@ -17,12 +17,12 @@ use crate::{
 
 #[derive(Debug)]
 pub struct SendCommandState<K: Copy> {
-    command_codec: CommandCodec,
-    authenticate_data_codec: AuthenticateDataCodec,
+    pub command_codec: CommandCodec,
+    pub authenticate_data_codec: AuthenticateDataCodec,
     // The commands that should be send.
-    send_queue: VecDeque<SendCommandQueueEntry<K>>,
+    pub send_queue: VecDeque<SendCommandQueueEntry<K>>,
     // State of the command that is currently being sent.
-    send_progress: Option<SendCommandProgress<K>>,
+    pub send_progress: Option<SendCommandProgress<K>>,
     // Used for writing the current command to the stream.
     // Should be empty if `send_progress` is `None`.
     write_buffer: BytesMut,
