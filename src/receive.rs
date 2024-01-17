@@ -128,6 +128,7 @@ impl<C: Decoder> ReceiveState<C> {
     }
 }
 
+#[derive(Debug)]
 pub enum ReceiveEvent<C: Decoder> {
     DecodingSuccess(C::Message<'static>),
     DecodingFailure(C::Error<'static>),

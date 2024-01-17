@@ -321,13 +321,13 @@ impl ServerFlow {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum NextExpectedMessage {
+pub enum NextExpectedMessage {
     Command,
     AuthenticateData,
 }
 
 #[derive(Debug)]
-enum ServerReceiveState {
+pub enum ServerReceiveState {
     Command(ReceiveState<CommandCodec>),
     AuthenticateData(ReceiveState<AuthenticateDataCodec>),
     // This state is set only temporarily during `ServerReceiveState::change_state`

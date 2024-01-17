@@ -324,14 +324,14 @@ pub enum SendCommandKind {
 }
 
 #[derive(Debug)]
-struct SendCommandQueueEntry<K> {
+pub struct SendCommandQueueEntry<K> {
     key: K,
     kind: SendCommandKind,
     fragments: VecDeque<Fragment>,
 }
 
 #[derive(Debug)]
-struct SendCommandProgress<K> {
+pub struct SendCommandProgress<K> {
     key: K,
     kind: SendCommandKind,
     // If defined we need to wait for something before we can send `next_fragments`.
