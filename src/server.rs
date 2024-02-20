@@ -572,4 +572,4 @@ pub enum ServerFlowError {
 
 /// A dummy codec we use for technical reasons when we don't want to receive anything at all.
 #[derive(Debug)]
-struct NoCodec;
+pub struct NoCodec;
