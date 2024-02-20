@@ -1,13 +1,12 @@
 use std::{collections::VecDeque, error::Error};
 
-use imap_codec::imap_types::{
-    auth::{AuthMechanism, AuthenticateData},
-    command::{Command, CommandBody},
-    secret::Secret,
-};
 use imap_flow::{
     client::{ClientFlow, ClientFlowEvent, ClientFlowOptions},
     stream::AnyStream,
+};
+use imap_types::{
+    auth::{AuthMechanism, AuthenticateData},
+    command::{Command, CommandBody},
 };
 use tag_generator::TagGenerator;
 use tokio::net::TcpStream;
@@ -30,8 +29,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let mut authenticate_data = VecDeque::from([
-        AuthenticateData::Continue(Secret::new(b"alice".to_vec())),
-        AuthenticateData::Continue(Secret::new(b"password".to_vec())),
+        AuthenticateData::Continue(b"alice".to_vec().into()),
+        AuthenticateData::Continue(b"password".to_vec().into()),
     ]);
 
     loop {
@@ -41,10 +40,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match event {
             ClientFlowEvent::ContinuationAuthenticateReceived { .. } => {
                 if let Some(authenticate_data) = authenticate_data.pop_front() {
-                    client.authenticate_continue(authenticate_data).unwrap();
+                    client.set_authenticate_data(authenticate_data).unwrap();
                 } else {
                     client
-                        .authenticate_continue(AuthenticateData::Cancel)
+                        .set_authenticate_data(AuthenticateData::Cancel)
                         .unwrap();
                 }
             }

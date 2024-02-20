@@ -1,15 +1,16 @@
 use std::{net::SocketAddr, sync::Arc};
 
 use colored::Colorize;
-use imap_codec::imap_types::{
-    bounded_static::ToBoundedStatic,
-    core::Text,
-    response::{Code, Status},
-};
 use imap_flow::{
     client::{ClientFlow, ClientFlowError, ClientFlowEvent, ClientFlowOptions},
     server::{ServerFlow, ServerFlowError, ServerFlowEvent, ServerFlowOptions},
     stream::AnyStream,
+};
+use imap_types::{
+    bounded_static::ToBoundedStatic,
+    command::{Command, CommandBody},
+    core::Text,
+    response::{Code, Status},
 };
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
@@ -84,11 +85,15 @@ impl Proxy<BoundState> {
                         }
                     };
 
-                    rustls::ServerConfig::builder()
+                    let mut config = rustls::ServerConfig::builder()
                         .with_safe_defaults()
                         .with_no_client_auth()
                         // Note: The name is misleading. We provide the full chain here.
-                        .with_single_cert(certificate_chain, leaf_key)?
+                        .with_single_cert(certificate_chain, leaf_key)?;
+
+                    config.alpn_protocols = vec![b"imap".to_vec()];
+
+                    config
                 };
 
                 // TODO: The acceptor should really be part of the proxy initialization.
@@ -186,10 +191,10 @@ pub struct ConnectedState {
 impl State for ConnectedState {}
 
 impl Proxy<ConnectedState> {
-    pub async fn start_conversion(self) {
+    pub async fn start_conversation(self) {
         let (mut proxy_to_server, mut greeting) = {
             // TODO: Read options from config
-            let options = ClientFlowOptions { crlf_relaxed: true };
+            let options = ClientFlowOptions::default();
 
             let result = ClientFlow::receive_greeting(self.state.proxy_to_server, options).await;
 
@@ -207,11 +212,9 @@ impl Proxy<ConnectedState> {
 
         let (mut client_to_proxy, greeting) = {
             // TODO: Read options from config
-            let options = ServerFlowOptions {
-                literal_accept_text: Text::try_from(LITERAL_ACCEPT_TEXT).unwrap(),
-                literal_reject_text: Text::try_from(LITERAL_REJECT_TEXT).unwrap(),
-                ..Default::default()
-            };
+            let mut options = ServerFlowOptions::default();
+            options.literal_accept_text = Text::try_from(LITERAL_ACCEPT_TEXT).unwrap();
+            options.literal_reject_text = Text::try_from(LITERAL_REJECT_TEXT).unwrap();
 
             let result =
                 ServerFlow::send_greeting(self.state.client_to_proxy, options, greeting).await;
@@ -295,8 +298,23 @@ fn handle_client_event(
             trace!(authenticate_data=%format!("{:?}", authenticate_data).red(), role = "c2p", "|--> Received authenticate_data");
             // TODO: unwrap
             let _handle = proxy_to_server
-                .authenticate_continue(authenticate_data)
+                .set_authenticate_data(authenticate_data)
                 .unwrap();
+            // TODO: log handle
+        }
+        ServerFlowEvent::IdleCommandReceived { tag } => {
+            let command = Command {
+                tag,
+                body: CommandBody::Idle,
+            };
+
+            trace!(command=%format!("{:?}", command).red(), role = "c2p", "|--> Received command (idle)");
+            let _handle = proxy_to_server.enqueue_command(command);
+            // TODO: log handle
+        }
+        ServerFlowEvent::IdleDoneReceived => {
+            trace!(role = "c2p", "|--> Received done (idle)");
+            let _handle = proxy_to_server.set_idle_done();
             // TODO: log handle
         }
     }
@@ -394,6 +412,36 @@ fn handle_server_event(
             trace!(response=%format!("{:?}", continuation).blue(), role = "s2p", "<--| Received continuation");
             util::filter_capabilities_in_continuation(&mut continuation);
             let _handle = client_to_proxy.enqueue_continuation(continuation);
+            // TODO: log handle
+        }
+        ClientFlowEvent::IdleCommandSent { handle: _handle } => {
+            trace!(role = "p2s", "---> Forwarded command (idle)");
+            // TODO: log handle
+        }
+        ClientFlowEvent::IdleAccepted {
+            handle: _handle,
+            continuation,
+        } => {
+            // TODO: log handle
+            trace!(
+                role = "s2p",
+                ?continuation,
+                "<--| Received continuation (idle)"
+            );
+            let _handle2 = client_to_proxy.idle_accept(continuation);
+            // TODO: log handle2
+        }
+        ClientFlowEvent::IdleRejected {
+            handle: _handle,
+            status,
+        } => {
+            // TODO: log handle
+            trace!(role = "s2p", ?status, "<--| Received status (idle)");
+            let _handle2 = client_to_proxy.idle_reject(status);
+            // TODO: log handle2
+        }
+        ClientFlowEvent::IdleDoneSent { handle: _handle } => {
+            trace!(role = "p2s", "---> Forwarded done (idle)");
             // TODO: log handle
         }
     }

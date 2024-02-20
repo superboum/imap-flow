@@ -1,3 +1,5 @@
+pub mod tasks;
+
 use std::{
     any::Any,
     collections::VecDeque,
@@ -5,17 +7,15 @@ use std::{
     marker::PhantomData,
 };
 
-use imap_codec::imap_types::{
+use imap_flow::client::{ClientFlow, ClientFlowCommandHandle, ClientFlowError, ClientFlowEvent};
+use imap_types::{
     auth::AuthenticateData,
     command::{Command, CommandBody},
     core::Tag,
     response::{Bye, CommandContinuationRequest, Data, Response, Status, StatusBody, Tagged},
 };
-use imap_flow::client::{ClientFlow, ClientFlowCommandHandle, ClientFlowError, ClientFlowEvent};
 use tag_generator::TagGenerator;
 use thiserror::Error;
-
-pub mod tasks;
 
 /// Tells how a specific IMAP [`Command`] is processed.
 ///
@@ -242,6 +242,10 @@ impl Scheduler {
                         return Ok(SchedulerEvent::TaskFinished(TaskToken { handle, output }));
                     }
                 },
+                ClientFlowEvent::IdleCommandSent { .. } => todo!(),
+                ClientFlowEvent::IdleAccepted { .. } => todo!(),
+                ClientFlowEvent::IdleRejected { .. } => todo!(),
+                ClientFlowEvent::IdleDoneSent { .. } => todo!(),
             }
         }
     }
@@ -373,8 +377,6 @@ impl<T: Task> TaskHandle<T> {
 
 #[derive(Debug)]
 pub struct TaskToken {
-    // TODO(#53): Bind this token to a `Scheduler` instance.
-    //            Make sure invariants can't be bypassed by creating a second scheduler.
     handle: ClientFlowCommandHandle,
     output: Option<Box<dyn Any>>,
 }

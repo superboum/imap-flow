@@ -1,15 +1,16 @@
-use imap_codec::imap_types::{
+use imap_types::{
     auth::AuthMechanism,
     command::{Command, CommandBody},
     core::Tag,
     response::{Greeting, Status},
 };
-use imap_flow::{
+use tokio::net::{TcpListener, TcpStream};
+
+use crate::{
     client::{ClientFlow, ClientFlowEvent, ClientFlowOptions},
     server::{ServerFlow, ServerFlowEvent, ServerFlowOptions},
     stream::AnyStream,
 };
-use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
 async fn self_test() {

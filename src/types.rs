@@ -1,6 +1,10 @@
+//! Types that extend `imap-types`.
+//!
+//! TODO: Do we really need this?
+
 use std::borrow::Cow;
 
-use imap_codec::imap_types::{
+use imap_types::{
     auth::AuthMechanism,
     command::{Command, CommandBody},
     core::Tag,

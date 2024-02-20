@@ -1,8 +1,8 @@
 use std::{fs::File, io::BufReader, path::Path};
 
-use imap_codec::imap_types::{
+use imap_types::{
     auth::AuthMechanism,
-    core::NonEmptyVec,
+    core::Vec1,
     response::{
         Bye, Capability, Code, CommandContinuationRequest, CommandContinuationRequestBasic, Data,
         Greeting, Status, StatusBody, Tagged,
@@ -17,7 +17,7 @@ pub enum ControlFlow {
     Abort,
 }
 
-// Remove unsupported capabilities in a greetings `Code::Capability`.
+/// Remove unsupported capabilities in a greetings `Code::Capability`.
 pub fn filter_capabilities_in_greeting(greeting: &mut Greeting) {
     if let Some(Code::Capability(capabilities)) = &mut greeting.code {
         let filtered = filter_capabilities(capabilities.clone());
@@ -33,7 +33,7 @@ pub fn filter_capabilities_in_greeting(greeting: &mut Greeting) {
     }
 }
 
-// Remove unsupported capabilities in a `Data::Capability`.
+/// Remove unsupported capabilities in a `Data::Capability`.
 pub fn filter_capabilities_in_data(data: &mut Data) {
     if let Data::Capability(capabilities) = data {
         let filtered = filter_capabilities(capabilities.clone());
@@ -49,7 +49,7 @@ pub fn filter_capabilities_in_data(data: &mut Data) {
     }
 }
 
-// Remove unsupported capabilities in a status' `Code::Capability`.
+/// Remove unsupported capabilities in a status' `Code::Capability`.
 pub fn filter_capabilities_in_status(status: &mut Status) {
     if let Status::Tagged(Tagged {
         body:
@@ -81,7 +81,7 @@ pub fn filter_capabilities_in_status(status: &mut Status) {
     }
 }
 
-// Remove unsupported capabilities in command continuation request response.
+/// Remove unsupported capabilities in command continuation request response.
 pub fn filter_capabilities_in_continuation(continuation: &mut CommandContinuationRequest) {
     if let CommandContinuationRequest::Basic(basic) = continuation {
         if let Some(Code::Capability(capabilities)) = basic.code() {
@@ -97,7 +97,7 @@ pub fn filter_capabilities_in_continuation(continuation: &mut CommandContinuatio
 }
 
 // Remove unsupported capabilities in a capability list.
-fn filter_capabilities(capabilities: NonEmptyVec<Capability>) -> NonEmptyVec<Capability> {
+fn filter_capabilities(capabilities: Vec1<Capability>) -> Vec1<Capability> {
     let filtered: Vec<_> = capabilities
         .into_iter()
         .filter(|capability| match capability {
@@ -106,11 +106,15 @@ fn filter_capabilities(capabilities: NonEmptyVec<Capability>) -> NonEmptyVec<Cap
             Capability::SaslIr => true,
             Capability::Quota | Capability::QuotaRes(_) | Capability::QuotaSet => true,
             Capability::Move => true,
+            Capability::LiteralPlus | Capability::LiteralMinus => true,
+            Capability::Unselect => true,
+            Capability::Id => true,
+            Capability::Idle => true,
             _ => false,
         })
         .collect();
 
-    NonEmptyVec::try_from(filtered).unwrap_or(NonEmptyVec::from(Capability::Imap4Rev1))
+    Vec1::try_from(filtered).unwrap_or(Vec1::from(Capability::Imap4Rev1))
 }
 
 fn is_auth_mechanism_proxyable(auth_mechanism: &AuthMechanism) -> bool {

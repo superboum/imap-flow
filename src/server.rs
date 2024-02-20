@@ -1,22 +1,23 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, future::pending};
 
 use bytes::BytesMut;
 use imap_codec::{
-    decode::{AuthenticateDataDecodeError, CommandDecodeError},
-    imap_types::{
-        auth::AuthenticateData,
-        command::{Command, CommandBody},
-        core::Text,
-        response::{CommandContinuationRequest, Data, Greeting, Response, Status},
-    },
-    AuthenticateDataCodec, CommandCodec, GreetingCodec, ResponseCodec,
+    decode::{AuthenticateDataDecodeError, CommandDecodeError, IdleDoneDecodeError},
+    AuthenticateDataCodec, CommandCodec, GreetingCodec, IdleDoneCodec, ResponseCodec,
+};
+use imap_types::{
+    auth::AuthenticateData,
+    command::{Command, CommandBody},
+    core::{LiteralMode, Tag, Text},
+    extensions::idle::IdleDone,
+    response::{CommandContinuationRequest, Data, Greeting, Response, Status},
 };
 use thiserror::Error;
 
 use crate::{
     handle::{Handle, HandleGenerator, HandleGeneratorGenerator, RawHandle},
     receive::{ReceiveEvent, ReceiveState},
-    send::SendResponseState,
+    send_response::{SendResponseEvent, SendResponseState},
     stream::{AnyStream, StreamError},
     types::CommandAuthenticate,
 };
@@ -25,6 +26,7 @@ static HANDLE_GENERATOR_GENERATOR: HandleGeneratorGenerator<ServerFlowResponseHa
     HandleGeneratorGenerator::new();
 
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ServerFlowOptions {
     pub crlf_relaxed: bool,
     pub max_literal_size: u32,
@@ -51,10 +53,8 @@ impl Default for ServerFlowOptions {
 pub struct ServerFlow {
     pub stream: AnyStream,
     pub options: ServerFlowOptions,
-
     pub handle_generator: HandleGenerator<ServerFlowResponseHandle>,
-    pub send_response_state: SendResponseState<ResponseCodec, Option<ServerFlowResponseHandle>>,
-    pub next_expected_message: NextExpectedMessage,
+    pub send_response_state: SendResponseState<ResponseCodec>,
     pub receive_command_state: ServerReceiveState,
 }
 
@@ -68,10 +68,13 @@ impl ServerFlow {
         let write_buffer = BytesMut::new();
         let mut send_greeting_state =
             SendResponseState::new(GreetingCodec::default(), write_buffer);
-        send_greeting_state.enqueue((), greeting);
+        send_greeting_state.enqueue(None, greeting);
         let greeting = loop {
-            if let Some(((), greeting)) = send_greeting_state.progress(&mut stream).await? {
-                break greeting;
+            if let Some(SendResponseEvent { response, handle }) =
+                send_greeting_state.progress(&mut stream).await?
+            {
+                assert_eq!(handle, None);
+                break response;
             }
         };
 
@@ -85,7 +88,6 @@ impl ServerFlow {
             stream,
             options,
             handle_generator: HANDLE_GENERATOR_GENERATOR.generate(),
-            next_expected_message: NextExpectedMessage::Command,
             send_response_state,
             receive_command_state: ServerReceiveState::Command(receive_command_state),
         };
@@ -167,11 +169,14 @@ impl ServerFlow {
 
     pub async fn progress_send(&mut self) -> Result<Option<ServerFlowEvent>, ServerFlowError> {
         match self.send_response_state.progress(&mut self.stream).await? {
-            Some((Some(handle), response)) => {
+            Some(SendResponseEvent {
+                handle: Some(handle),
+                response,
+            }) => {
                 // A response was sucessfully sent, inform the caller
                 Ok(Some(ServerFlowEvent::ResponseSent { handle, response }))
             }
-            Some((None, _)) => {
+            Some(SendResponseEvent { handle: None, .. }) => {
                 // An internally created response was sent, don't inform the caller
                 Ok(None)
             }
@@ -194,10 +199,8 @@ impl ServerFlow {
                                 mechanism,
                                 initial_response,
                             } => {
-                                self.next_expected_message = NextExpectedMessage::AuthenticateData;
-
                                 self.receive_command_state
-                                    .change_state(self.next_expected_message);
+                                    .change_state(NextExpectedMessage::AuthenticateData);
 
                                 Ok(Some(ServerFlowEvent::CommandAuthenticateReceived {
                                     command_authenticate: CommandAuthenticate {
@@ -205,6 +208,14 @@ impl ServerFlow {
                                         mechanism,
                                         initial_response,
                                     },
+                                }))
+                            }
+                            CommandBody::Idle => {
+                                self.receive_command_state
+                                    .change_state(NextExpectedMessage::IdleAccept);
+
+                                Ok(Some(ServerFlowEvent::IdleCommandReceived {
+                                    tag: command.tag,
                                 }))
                             }
                             body => Ok(Some(ServerFlowEvent::CommandReceived {
@@ -218,35 +229,62 @@ impl ServerFlow {
                     ReceiveEvent::DecodingFailure(CommandDecodeError::LiteralFound {
                         tag,
                         length,
-                        mode: _mode,
+                        mode,
                     }) => {
                         if length > self.options.max_literal_size {
-                            let discarded_bytes = state.discard_message();
+                            match mode {
+                                LiteralMode::Sync => {
+                                    // Inform the client that the literal was rejected.
 
-                            // Inform the client that the literal was rejected.
-                            // This should never fail because the text is not Base64.
-                            let status = Status::no(
-                                Some(tag),
-                                None,
-                                self.options.literal_reject_text.clone(),
-                            )
-                            .unwrap();
-                            self.send_response_state
-                                .enqueue(None, Response::Status(status));
+                                    // Unwrap: This should never fail because the text is not Base64.
+                                    let status = Status::bad(
+                                        Some(tag),
+                                        None,
+                                        self.options.literal_reject_text.clone(),
+                                    )
+                                    .unwrap();
+                                    self.send_response_state
+                                        .enqueue(None, Response::Status(status));
 
-                            Err(ServerFlowError::LiteralTooLong { discarded_bytes })
+                                    let discarded_bytes = state.discard_message();
+
+                                    Err(ServerFlowError::LiteralTooLong { discarded_bytes })
+                                }
+                                LiteralMode::NonSync => {
+                                    // TODO: We can't (reliably) make the client stop sending data.
+                                    //       Some actions that come to mind:
+                                    //       * terminate the connection
+                                    //       * act as a "discard server", i.e., consume the full
+                                    //         literal w/o saving it, and answering with `BAD`
+                                    //       * ...
+                                    //
+                                    //       The LITERAL+ RFC has some recommendations.
+                                    let discarded_bytes = state.discard_message();
+
+                                    Err(ServerFlowError::LiteralTooLong { discarded_bytes })
+                                }
+                            }
                         } else {
                             state.start_literal(length);
 
-                            // Inform the client that the literal was accepted.
-                            // This should never fail because the text is not Base64.
-                            let cont = CommandContinuationRequest::basic(
-                                None,
-                                self.options.literal_accept_text.clone(),
-                            )
-                            .unwrap();
-                            self.send_response_state
-                                .enqueue(None, Response::CommandContinuationRequest(cont));
+                            match mode {
+                                LiteralMode::Sync => {
+                                    // Inform the client that the literal was accepted.
+
+                                    // Unwrap: This should never fail because the text is not Base64.
+                                    let cont = CommandContinuationRequest::basic(
+                                        None,
+                                        self.options.literal_accept_text.clone(),
+                                    )
+                                    .unwrap();
+                                    self.send_response_state
+                                        .enqueue(None, Response::CommandContinuationRequest(cont));
+                                }
+                                LiteralMode::NonSync => {
+                                    // We don't need to inform the client because non-sync literals
+                                    // are automatically accepted.
+                                }
+                            }
 
                             Ok(None)
                         }
@@ -284,6 +322,32 @@ impl ServerFlow {
                     }
                 }
             }
+            ServerReceiveState::IdleAccept(_) => {
+                // We block infinitely because we don't expect any message here.
+                // Instead the server flow user should drop this future and call
+                // `idle_accept` or `idle_reject`.
+                pending().await
+            }
+            ServerReceiveState::IdleDone(state) => match state.progress(&mut self.stream).await? {
+                ReceiveEvent::DecodingSuccess(IdleDone) => {
+                    state.finish_message();
+
+                    self.receive_command_state
+                        .change_state(NextExpectedMessage::Command);
+
+                    Ok(Some(ServerFlowEvent::IdleDoneReceived))
+                }
+                ReceiveEvent::DecodingFailure(
+                    IdleDoneDecodeError::Failed | IdleDoneDecodeError::Incomplete,
+                ) => {
+                    let discarded_bytes = state.discard_message();
+                    Err(ServerFlowError::MalformedMessage { discarded_bytes })
+                }
+                ReceiveEvent::ExpectedCrlfGotLf => {
+                    let discarded_bytes = state.discard_message();
+                    Err(ServerFlowError::ExpectedCrlfGotLf { discarded_bytes })
+                }
+            },
             ServerReceiveState::Dummy => {
                 unreachable!()
             }
@@ -293,30 +357,70 @@ impl ServerFlow {
     pub fn authenticate_continue(
         &mut self,
         continuation: CommandContinuationRequest<'static>,
-    ) -> Result<ServerFlowResponseHandle, ()> {
+    ) -> Result<ServerFlowResponseHandle, CommandContinuationRequest<'static>> {
         if let ServerReceiveState::AuthenticateData { .. } = self.receive_command_state {
             let handle = self.enqueue_continuation(continuation);
             Ok(handle)
         } else {
-            Err(())
+            Err(continuation)
         }
     }
 
     pub fn authenticate_finish(
         &mut self,
         status: Status<'static>,
-    ) -> Result<ServerFlowResponseHandle, ()> {
+    ) -> Result<ServerFlowResponseHandle, Status<'static>> {
         if let ServerReceiveState::AuthenticateData(_) = &mut self.receive_command_state {
             let handle = self.enqueue_status(status);
-            self.next_expected_message = NextExpectedMessage::Command;
 
             self.receive_command_state
-                .change_state(self.next_expected_message);
+                .change_state(NextExpectedMessage::Command);
 
             Ok(handle)
         } else {
-            Err(())
+            Err(status)
         }
+    }
+
+    pub fn idle_accept(
+        &mut self,
+        continuation_request: CommandContinuationRequest<'static>,
+    ) -> Result<ServerFlowResponseHandle, CommandContinuationRequest<'static>> {
+        if let ServerReceiveState::IdleAccept(_) = &mut self.receive_command_state {
+            let handle = self.enqueue_continuation(continuation_request);
+
+            self.receive_command_state
+                .change_state(NextExpectedMessage::IdleDone);
+
+            Ok(handle)
+        } else {
+            Err(continuation_request)
+        }
+    }
+
+    pub fn idle_reject(
+        &mut self,
+        status: Status<'static>,
+    ) -> Result<ServerFlowResponseHandle, Status<'static>> {
+        if let ServerReceiveState::IdleAccept(_) = &mut self.receive_command_state {
+            let handle = self.enqueue_status(status);
+
+            self.receive_command_state
+                .change_state(NextExpectedMessage::Command);
+
+            Ok(handle)
+        } else {
+            Err(status)
+        }
+    }
+
+    #[cfg(feature = "expose_stream")]
+    /// Return the underlying stream for debug purposes (or experiments).
+    ///
+    /// Note: Writing to or reading from the stream may introduce
+    /// conflicts with imap-flow.
+    pub fn stream_mut(&mut self) -> &mut AnyStream {
+        &mut self.stream
     }
 }
 
@@ -324,12 +428,16 @@ impl ServerFlow {
 pub enum NextExpectedMessage {
     Command,
     AuthenticateData,
+    IdleAccept,
+    IdleDone,
 }
 
 #[derive(Debug)]
 pub enum ServerReceiveState {
     Command(ReceiveState<CommandCodec>),
     AuthenticateData(ReceiveState<AuthenticateDataCodec>),
+    IdleAccept(ReceiveState<NoCodec>),
+    IdleDone(ReceiveState<IdleDoneCodec>),
     // This state is set only temporarily during `ServerReceiveState::change_state`
     Dummy,
 }
@@ -339,20 +447,44 @@ impl ServerReceiveState {
         // NOTE: This function MUST NOT panic. Otherwise the dummy state will remain indefinitely.
         let old_state = std::mem::replace(self, ServerReceiveState::Dummy);
         let new_state = match next_expected_message {
-            NextExpectedMessage::Command => ServerReceiveState::Command(match old_state {
-                ServerReceiveState::Command(state) => state,
-                ServerReceiveState::AuthenticateData(state) => {
-                    state.change_codec(CommandCodec::default())
-                }
-                ServerReceiveState::Dummy => unreachable!(),
-            }),
+            NextExpectedMessage::Command => {
+                let codec = CommandCodec::default();
+                Self::Command(match old_state {
+                    Self::Command(state) => state,
+                    Self::AuthenticateData(state) => state.change_codec(codec),
+                    Self::IdleAccept(state) => state.change_codec(codec),
+                    Self::IdleDone(state) => state.change_codec(codec),
+                    Self::Dummy => unreachable!(),
+                })
+            }
             NextExpectedMessage::AuthenticateData => {
-                ServerReceiveState::AuthenticateData(match old_state {
-                    ServerReceiveState::Command(state) => {
-                        state.change_codec(AuthenticateDataCodec::default())
-                    }
-                    ServerReceiveState::AuthenticateData(state) => state,
-                    ServerReceiveState::Dummy => unreachable!(),
+                let codec = AuthenticateDataCodec::default();
+                Self::AuthenticateData(match old_state {
+                    Self::Command(state) => state.change_codec(codec),
+                    Self::AuthenticateData(state) => state,
+                    Self::IdleAccept(state) => state.change_codec(codec),
+                    Self::IdleDone(state) => state.change_codec(codec),
+                    Self::Dummy => unreachable!(),
+                })
+            }
+            NextExpectedMessage::IdleAccept => {
+                let codec = NoCodec;
+                Self::IdleAccept(match old_state {
+                    Self::Command(state) => state.change_codec(codec),
+                    Self::AuthenticateData(state) => state.change_codec(codec),
+                    Self::IdleAccept(state) => state,
+                    Self::IdleDone(state) => state.change_codec(codec),
+                    Self::Dummy => todo!(),
+                })
+            }
+            NextExpectedMessage::IdleDone => {
+                let codec = IdleDoneCodec::default();
+                Self::IdleDone(match old_state {
+                    Self::Command(state) => state.change_codec(codec),
+                    Self::AuthenticateData(state) => state.change_codec(codec),
+                    Self::IdleAccept(state) => state.change_codec(codec),
+                    Self::IdleDone(state) => state,
+                    Self::Dummy => todo!(),
                 })
             }
         };
@@ -395,7 +527,9 @@ pub enum ServerFlowEvent {
         response: Response<'static>,
     },
     /// Command received.
-    CommandReceived { command: Command<'static> },
+    CommandReceived {
+        command: Command<'static>,
+    },
     /// Command AUTHENTICATE received.
     ///
     /// Note: The server MUST call [`ServerFlow::authenticate_continue`] (if it needs more data for
@@ -415,7 +549,13 @@ pub enum ServerFlowEvent {
     /// Note, too: The client may abort the authentication by using [`AuthenticateData::Cancel`].
     /// Make sure to honor the client's request to not end up in an infinite loop. It's up to the
     /// server to end the authentication flow.
-    AuthenticateDataReceived { authenticate_data: AuthenticateData },
+    AuthenticateDataReceived {
+        authenticate_data: AuthenticateData,
+    },
+    IdleCommandReceived {
+        tag: Tag<'static>,
+    },
+    IdleDoneReceived,
 }
 
 #[derive(Debug, Error)]
@@ -429,3 +569,7 @@ pub enum ServerFlowError {
     #[error("Literal was rejected because it was too long")]
     LiteralTooLong { discarded_bytes: Box<[u8]> },
 }
+
+/// A dummy codec we use for technical reasons when we don't want to receive anything at all.
+#[derive(Debug)]
+struct NoCodec;
